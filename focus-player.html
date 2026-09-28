@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Focus Player</title>
+<style>
+:root{--bg:#0e1420;--panel:#172033;--line:#26324a;--text:#e8edf6;--dim:#8d9ab3;--acc:#5eead4;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,-apple-system,sans-serif}
+main{max-width:860px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:4px 0 14px;font-weight:650}
+.add{display:flex;gap:8px}
+.add input{flex:1;min-width:0;padding:12px 14px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--text);font-size:15px}
+button{font:inherit;cursor:pointer;border:0;color:var(--text);background:none}
+.add button{padding:0 18px;border-radius:10px;background:var(--acc);color:#06201c;font-weight:650}
+#err{color:#fca5a5;font-size:13px;min-height:18px;margin:6px 2px}
+#stage{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:12px;overflow:hidden;display:none}
+#stage.on{display:block}
+#stage.full{border-radius:0;aspect-ratio:auto;height:100%}
+#yt{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#yt iframe{width:100%;height:100%;pointer-events:none}
+#shield{position:absolute;inset:0;bottom:0}
+#scrim{position:absolute;inset:0;background:var(--bg);display:none;place-items:center}
+#scrim.on{display:grid}
+#bigplay{width:64px;height:64px;border-radius:50%;background:var(--acc);color:#06201c;font-size:26px}
+#bar{position:absolute;left:0;right:0;bottom:0;padding:26px 12px 10px;background:linear-gradient(transparent,rgba(0,0,0,.75));display:flex;flex-direction:column;gap:6px;transition:opacity .25s}
+#bar.wait button,#bar.wait input{opacity:.35}
+#stage.idle #bar{opacity:0;pointer-events:none}
+#seek{width:100%;accent-color:var(--acc);margin:0}
+.row{display:flex;align-items:center;gap:6px}
+.row button{padding:6px 9px;border-radius:8px;font-size:14px}
+.row button:active{background:rgba(255,255,255,.15)}
+#time{font-size:12.5px;color:#dbe3f2;margin-left:4px;white-space:nowrap}
+.sp{flex:1}
+h2{font-size:15px;color:var(--dim);font-weight:600;margin:22px 0 8px}
+.item{display:flex;align-items:center;gap:10px;padding:8px;border-radius:10px;background:var(--panel);margin-bottom:8px}
+.item img{width:96px;aspect-ratio:16/9;object-fit:cover;border-radius:6px;background:#000}
+.item .t{flex:1;min-width:0;text-align:left;font-size:14px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.item .x{color:var(--dim);padding:8px}
+.empty{color:var(--dim);font-size:14px;padding:6px 2px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Focus Player</h1>
+  <div class="add">
+    <input id="url" placeholder="Paste a YouTube link" inputmode="url" autocomplete="off">
+    <button id="go">Play</button>
+  </div>
+  <div id="err"></div>
+
+  <div id="stage">
+    <div id="yt"></div>
+    <div id="shield"></div>
+    <div id="scrim"><button id="bigplay" aria-label="Play">▶</button></div>
+    <div id="bar">
+      <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
+      <div class="row">
+        <button id="pp" aria-label="Play or pause">⏵</button>
+        <button id="b10" aria-label="Back 10 seconds">⏪ 10</button>
+        <button id="f10" aria-label="Forward 10 seconds">10 ⏩</button>
+        <span id="time">0:00 / 0:00</span>
+        <span class="sp"></span>
+        <button id="spd" aria-label="Playback speed">1×</button>
+        <button id="mute" aria-label="Mute">🔊</button>
+        <button id="fs" aria-label="Fullscreen">⛶</button>
+      </div>
+    </div>
+  </div>
+
+  <h2>Your videos</h2>
+  <div id="lib"></div>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const stage=$('stage'),seek=$('seek');
+let player=null,cur=null,ready=false,idleT=null,dragging=false,tick=null;
+const SPEEDS=[0.75,1,1.25,1.5,1.75,2];
+
+// ---- storage (safe) ----
+const store={
+  get(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}},
+  set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
+};
+let lib=store.get('fp:lib',[]);
+let pos=store.get('fp:pos',{});
+
+// ---- link parsing ----
+function parseId(s){
+  s=(s||'').trim();
+  if(/^[\w-]{11}$/.test(s))return s;
+  try{
+    const u=new URL(s.startsWith('http')?s:'https://'+s);
+    const h=u.hostname.replace('www.','').replace('m.','');
+    if(h==='youtu.be')return u.pathname.slice(1,12);
+    if(h.endsWith('youtube.com')){
+      if(u.searchParams.get('v'))return u.searchParams.get('v').slice(0,11);
+      const m=u.pathname.match(/\/(embed|shorts|live|v)\/([\w-]{11})/);
+      if(m)return m[2];
+    }
+  }catch(e){}
+  return null;
+}
+
+// ---- YouTube API ----
+const tag=document.createElement('script');
+tag.src='https://www.youtube.com/iframe_api';
+tag.onerror=()=>fail('Couldn’t reach YouTube’s player script. Check your internet connection, then reload.');
+document.head.appendChild(tag);
+function fail(m){$('err').textContent=m}
+if(location.protocol==='file:')fail('Open this through a web address (https://…), not as a saved file. YouTube blocks players on file:// pages. See the setup steps in chat.');
+setTimeout(()=>{if(!apiReady)fail('Still can’t load YouTube’s player. This happens in preview windows and when opened as a local file. Host the page on https and try again.')},7000);
+let apiReady=false,pending=null;
+window.onYouTubeIframeAPIReady=()=>{apiReady=true;if(pending){const p=pending;pending=null;load(p)}};
+
+function load(id){
+  cur=id;$('err').textContent='';$('bar').classList.toggle('wait',!ready);
+  stage.classList.add('on');
+  if(!apiReady){pending=id;if(location.protocol!=='file:')$('err').textContent='Loading player…';return}
+  $('err').textContent='';
+  const start=Math.floor(pos[id]||0);
+  if(player&&ready){
+    player.loadVideoById({videoId:id,startSeconds:start});
+  }else{
+    ready=false;
+    player=new YT.Player('yt',{
+      videoId:id,
+      playerVars:{controls:0,rel:0,modestbranding:1,disablekb:1,fs:0,iv_load_policy:3,playsinline:1,start:start,origin:location.origin&&location.origin!=='null'?location.origin:undefined},
+      events:{onReady:()=>{ready=true;$('bar').classList.remove('wait');player.playVideo()},onStateChange:onState,onError:e=>{const c=e.data;$('err').textContent=(c===101||c===150)?'The owner has disabled playing this video outside YouTube. Try a different video.':(c===153||c===152)?'YouTube refused this page. Host it on https (not a local file) and reload.':'This video can’t be played (error '+c+').'}}
+    });
+  }
+  $('scrim').classList.remove('on');
+  nudge();
+}
+
+function onState(e){
+  const s=e.data;
+  $('pp').textContent=s===1?'⏸':'⏵';
+  $('scrim').classList.toggle('on',s===0);
+  if(s===1){startTick();addToLib()}else if(s===2||s===0){savePos()}
+}
+
+function addToLib(){
+  if(!cur||!player||!player.getVideoData)return;
+  const title=(player.getVideoData()||{}).title||'Untitled video';
+  const i=lib.findIndex(v=>v.id===cur);
+  if(i>-1)lib.splice(i,1);
+  lib.unshift({id:cur,title});
+  lib=lib.slice(0,30);store.set('fp:lib',lib);renderLib();
+}
+
+function fmt(t){t=Math.max(0,Math.floor(t||0));const h=Math.floor(t/3600),m=Math.floor(t%3600/60),s=t%60;
+  return (h?h+':'+String(m).padStart(2,'0'):m)+':'+String(s).padStart(2,'0')}
+
+function startTick(){
+  clearInterval(tick);
+  tick=setInterval(()=>{
+    if(!ready||!player.getDuration)return;
+    const d=player.getDuration(),c=player.getCurrentTime();
+    if(!dragging&&d)seek.value=c/d*1000;
+    $('time').textContent=fmt(c)+' / '+fmt(d);
+    if(Math.floor(c)%5===0)savePos();
+  },500);
+}
+function savePos(){
+  if(!ready||!cur)return;
+  const c=player.getCurrentTime(),d=player.getDuration();
+  pos[cur]=(d&&c>d-5)?0:c;store.set('fp:pos',pos);
+}
+
+// ---- controls ----
+function toggle(){if(!ready)return;player.getPlayerState()===1?player.pauseVideo():player.playVideo()}
+function skip(n){if(!ready)return;player.seekTo(player.getCurrentTime()+n,true)}
+$('pp').onclick=toggle;
+$('bigplay').onclick=()=>{ready&&(player.seekTo(0,true),player.playVideo())};
+$('b10').onclick=()=>skip(-10);
+$('f10').onclick=()=>skip(10);
+$('shield').onclick=()=>{
+  if(stage.classList.contains('idle')){nudge()}else{toggle();nudge()}
+};
+seek.oninput=()=>{dragging=true;if(ready)$('time').textContent=fmt(seek.value/1000*player.getDuration())+' / '+fmt(player.getDuration())};
+seek.onchange=()=>{if(ready)player.seekTo(seek.value/1000*player.getDuration(),true);dragging=false};
+$('spd').onclick=()=>{
+  if(!ready)return;
+  const c=player.getPlaybackRate();
+  const n=SPEEDS[(SPEEDS.indexOf(c)+1)%SPEEDS.length]||1;
+  player.setPlaybackRate(n);$('spd').textContent=n+'×';
+};
+$('mute').onclick=()=>{
+  if(!ready)return;
+  if(player.isMuted()){player.unMute();$('mute').textContent='🔊'}else{player.mute();$('mute').textContent='🔇'}
+};
+$('fs').onclick=()=>{
+  const d=document;
+  if(d.fullscreenElement||d.webkitFullscreenElement){(d.exitFullscreen||d.webkitExitFullscreen).call(d)}
+  else{const f=stage.requestFullscreen||stage.webkitRequestFullscreen;f&&f.call(stage)}
+};
+document.addEventListener('fullscreenchange',()=>stage.classList.toggle('full',!!document.fullscreenElement));
+function nudge(){
+  stage.classList.remove('idle');clearTimeout(idleT);
+  idleT=setTimeout(()=>{if(ready&&player.getPlayerState()===1)stage.classList.add('idle')},3000);
+}
+stage.addEventListener('mousemove',nudge);
+
+// ---- library ----
+function renderLib(){
+  const el=$('lib');el.innerHTML='';
+  if(!lib.length){el.innerHTML='<div class="empty">Videos you play show up here so you can resume them later.</div>';return}
+  lib.forEach(v=>{
+    const d=document.createElement('div');d.className='item';
+    d.innerHTML='<img alt="" src="https://i.ytimg.com/vi/'+v.id+'/mqdefault.jpg"><button class="t"></button><button class="x" aria-label="Remove">✕</button>';
+    d.querySelector('.t').textContent=v.title;
+    d.querySelector('.t').onclick=()=>{load(v.id);window.scrollTo({top:0,behavior:'smooth'})};
+    d.querySelector('img').onclick=()=>{load(v.id);window.scrollTo({top:0,behavior:'smooth'})};
+    d.querySelector('.x').onclick=()=>{lib=lib.filter(x=>x.id!==v.id);store.set('fp:lib',lib);renderLib()};
+    el.appendChild(d);
+  });
+}
+function submit(){
+  const id=parseId($('url').value);
+  if(!id){$('err').textContent='That doesn’t look like a YouTube link. Paste the full link or the video ID.';return}
+  $('url').value='';load(id);
+}
+$('go').onclick=submit;
+$('url').addEventListener('keydown',e=>{if(e.key==='Enter')submit()});
+renderLib();
+</script>
+</body>
+</html>
